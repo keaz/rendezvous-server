@@ -24,7 +24,7 @@ public class RequestDecoder extends ReplayingDecoder<Notification> {
         var dataLength = ByteBuffer.wrap(lengthBytes).getInt();
         if (dataLength > 0) {
             final var data = in.readBytes(dataLength);
-            var ois = new ObjectInputStream(new ByteArrayInputStream(data.array()));
+            final var ois = new ObjectInputStream(new ByteArrayInputStream(data.array()));
             final var not = (Serializable) ois.readObject();
             log.debug("Got Notification {}", not);
             if (not instanceof List notifications) {
@@ -43,41 +43,6 @@ public class RequestDecoder extends ReplayingDecoder<Notification> {
                 log.info("Client removed {}", removed.clientId());
             }
         }
-//        try {
-//            ObjectInputStream ois;
-//            if (in.hasArray()) {
-//                ois = new ObjectInputStream(new ByteArrayInputStream(in.array()));
-//            } else {
-//                final var readableBytes = in.readableBytes();
-//                if(readableBytes > 1024){
-//                    in.clear();
-//                    return;
-//                }
-//                byte[] bytes = new byte[readableBytes];
-//                in.readBytes(bytes);
-//                ois = new ObjectInputStream(new ByteArrayInputStream(bytes));
-//            }
-//
-//            final var not = (Serializable) ois.readObject();
-//            log.debug("Got Notification {}", not);
-//            if (not instanceof List notifications) {
-//
-//                log.info("Client notification {}", notifications);
-//                list.addAll(notifications);
-//                return;
-//            }
-//
-//            list.add(not);
-//            if (not instanceof ClientNotification notification) {
-//                log.info("Got new client join event {}", notification.clientId());
-//            }
-//
-//            if (not instanceof ClientRemovedNotification removed) {
-//                log.info("Client removed {}", removed.uuid());
-//            }
-//        } catch (Exception e) {
-//            log.error("Failed to decode message", e);
-//            throw e;
-//        }
+
     }
 }
