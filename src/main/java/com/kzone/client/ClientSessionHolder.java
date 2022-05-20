@@ -1,4 +1,6 @@
-package com.kzone.p2p.event;
+package com.kzone.client;
+
+import com.kzone.client.event.ClientUpdated;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -9,7 +11,7 @@ import java.util.UUID;
 public class ClientSessionHolder {
 
     private static final ClientSessionHolder SINGLETON = new ClientSessionHolder();
-    private final Map<UUID, Client> clientMap = new HashMap<>();
+    private final Map<String, Client> clientMap = new HashMap<>();
 
     public static ClientSessionHolder clientSessionHolder() {
         return SINGLETON;
@@ -22,9 +24,8 @@ public class ClientSessionHolder {
         clientMap.put(client.getClientId(), client);
     }
 
-    public void updateClientInfo(UUID clientId, ClientUpdatedNotification clientInfoRequest) {
+    public void updateClientInfo(UUID clientId, ClientUpdated clientInfoRequest) {
         final var client = clientMap.get(clientId);
-        client.setClientName(clientInfoRequest.clientName());
     }
 
     public Client getClient(UUID uuid) {

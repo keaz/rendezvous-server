@@ -1,6 +1,6 @@
 package com.kzone.server;
 
-import com.kzone.p2p.event.Notification;
+import com.kzone.client.event.ClientEvent;
 import com.kzone.server.handler.ServerHandler;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelInitializer;
@@ -36,8 +36,8 @@ public class Server {
                 @Override
                 public void initChannel(SocketChannel ch) throws Exception {
                     ChannelPipeline p = ch.pipeline();
-                    p.addLast(new LoggingHandler(LogLevel.DEBUG));
-                    p.addLast("decoder", new ObjectDecoder(ClassResolvers.cacheDisabled(Notification.class.getClassLoader())));
+//                    p.addLast(new LoggingHandler(LogLevel.DEBUG));
+                    p.addLast("decoder", new ObjectDecoder(ClassResolvers.cacheDisabled(ClientEvent.class.getClassLoader())));
                     p.addLast("encoder", new ObjectEncoder());
                     p.addLast("handler", new ServerHandler());
                 }
