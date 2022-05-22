@@ -43,6 +43,7 @@ public class Server {
                 }
             });
             bootstrap.option(ChannelOption.SO_BACKLOG, 128);
+            bootstrap.option(ChannelOption.SO_REUSEADDR, true);
             bootstrap.childOption(ChannelOption.SO_KEEPALIVE, true);
 
             // Start the server.

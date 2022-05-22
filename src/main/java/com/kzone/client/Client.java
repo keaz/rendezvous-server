@@ -10,7 +10,6 @@ import java.io.Serializable;
 import java.net.InetSocketAddress;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.UUID;
 
 
 @Log4j2
@@ -24,7 +23,7 @@ public class Client implements Serializable {
     private final int port;
     private int state = CONNECTED;
 
-    private final Channel channel;
+    private final transient Channel channel;
     private final InetSocketAddress inetSocketAddress;
 
     public Client(String clientId, LocalDateTime joinedTime, Channel channel, int port) {
@@ -43,7 +42,7 @@ public class Client implements Serializable {
         return port;
     }
 
-    public String getClientAddress() {
+    public String getRemoteAddress() {
         return inetSocketAddress.getAddress().getHostAddress();
     }
 

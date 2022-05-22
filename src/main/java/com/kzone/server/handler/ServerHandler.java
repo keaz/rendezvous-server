@@ -32,12 +32,13 @@ public class ServerHandler extends SimpleChannelInboundHandler<ClientEvent> {
     public void channelRead0(ChannelHandlerContext ctx, ClientEvent msg) throws Exception {
         log.debug("Message received: {}", msg);
         if (msg instanceof ClientJoined clientJoined) {
-            final var socketAddress = (InetSocketAddress) ctx.channel().remoteAddress();
-            log.debug("Socket address {}", socketAddress.getAddress().getHostAddress());
-            var newClient = new Client(clientJoined.id(), LocalDateTime.now(), ctx.channel(), clientJoined.port());
+            final var remoteAddress = (InetSocketAddress) ctx.channel().remoteAddress();
+            log.debug("Socket remote address {}", remoteAddress.getAddress());
+
+            var newClient = new Client(clientJoined.id(), LocalDateTime.now(), ctx.channel(), remoteAddress.getPort());
             SessionHolder.clientSessionHolder().addClient(newClient);
             final var clientInfoList = SessionHolder.clientSessionHolder().getClients().stream()
-                    .map(client -> new ClientInfo(client.getClientId(), client.getClientAddress(), client.getPort())).toList();
+                    .map(client -> new ClientInfo(client.getClientId(), client.getRemoteAddress(), client.getPort())).toList();
             newClient.sendClients(clientInfoList);
         }
 
