@@ -1,0 +1,291 @@
+pub mod server {
+    use std::{collections::{hash_map::Entry, HashMap}, sync::Arc};
+    use serde::{Deserialize, Serialize};
+    use async_std::{io::BufReader, net::{TcpListener, TcpStream, ToSocketAddrs}, prelude::*, task};
+    use futures::{channel::mpsc, FutureExt, select, SinkExt};
+    use log::{debug, info, warn};
+
+    pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    type Sender<T> = mpsc::UnboundedSender<T>;
+    type Receiver<T> = mpsc::UnboundedReceiver<T>;
+
+    enum Void {}
+
+    enum Event {
+        NewClient {
+            id: String,
+            client_id: String,
+            address: String,
+            port: i32,
+            stream: Arc<TcpStream>,
+            shutdown: Receiver<Void>,
+        },
+        ClientLeft{
+            id: String,
+            client_id: String,
+        }
+
+    }
+
+    pub struct Client {
+        pub peer_id: String,
+        pub address: String,
+        pub port: i32,
+        pub sender: Sender<ClientEvent>,
+    }
+    
+    #[derive(Serialize, Deserialize,Debug)]
+    pub struct ConnectedPeer{
+        pub peer_id: String,
+        pub address: String,
+        pub port: i32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum ClientEvent {
+        ClientConnected {
+            id: String,
+            client_id: String,
+            peers: Vec<ConnectedPeer>,
+        },
+        ClientLeft{
+            id: String,
+            client_id: String,
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub enum ClientCommand {
+        ConnectClient {
+            id: String,
+            client_id: String,
+            port: i32,
+        },
+        LeaveClient {
+            id: String,
+            client_id: String,
+        }
+    }
+
+
+    pub fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()> where F: Future<Output = Result<()>> + Send + 'static,{
+        task::spawn(async move {
+            if let Err(e) = fut.await {
+                warn!("{}", e)
+            }
+        })
+    }
+
+    pub async fn accept_loop(addr: impl ToSocketAddrs) -> Result<()> {
+        info!("Start accepting incomming connections");
+        let listener = TcpListener::bind(addr).await?;
+        let (broker_sender, broker_receiver) = mpsc::unbounded();
+        let broker_handle = task::spawn(broker_loop(broker_receiver));
+        let mut incoming = listener.incoming();
+        while let Some(stream) = incoming.next().await {
+            let stream = stream?;
+            info!("Accepting from: {}", stream.peer_addr()?);
+            spawn_and_log_error(connection_loop(broker_sender.clone(), stream));
+        }
+        drop(broker_sender);
+        broker_handle.await;
+        Ok(())
+    }
+
+    async fn broker_loop(events: Receiver<Event>) {
+        let (disconnect_sender, mut disconnect_receiver) = mpsc::unbounded::<(String, Receiver<ClientEvent>)>();
+        let mut peers: HashMap<String, Client> = HashMap::new();
+        let mut events = events.fuse();
+        loop {
+            let event = select! {
+                event = events.next().fuse() => match event {
+                    None => break, // 2
+                    Some(event) => event,
+                },
+                disconnect = disconnect_receiver.next().fuse() => {
+                    let (id, _pending_messages) = disconnect.unwrap(); // 3
+                    match peers.remove(&id) {
+                        None => {
+                            warn!("Client already left client_id::{}",id)
+                        },
+                        Some(peer) => {
+                            info!("Client is leaving client_id::{}",&peer.peer_id);
+                            for peer in peers.values() {
+                                let left_event = ClientEvent::ClientLeft { id: id.clone(), client_id: String::from(peer.peer_id.clone())};
+                                peer.sender.clone().send(left_event).await.unwrap();
+                            }
+                            drop(peer);
+                        }
+                    }
+                    continue;
+                },
+            };
+            match event {
+                Event::ClientLeft { id,client_id } => {
+                    match peers.remove(&client_id) {
+                        None => {
+                            warn!("Client already left id::{} client_id::{}",id,client_id)
+                        },
+                        Some(peer) => {
+                            info!("Client is leaving client_id::{}",peer.peer_id);
+                            for peer in peers.values() {
+                                let left_event = ClientEvent::ClientLeft { id: id.clone(), client_id: String::from(client_id.clone())};
+                                peer.sender.clone().send(left_event).await.unwrap();
+                            }
+                            
+                            drop(peer);
+                        }
+                    }
+                }
+                Event::NewClient { id, client_id, address, port, stream, shutdown } => {
+                    match peers.entry(client_id.clone()) {
+                        Entry::Occupied(..) => (),
+                        Entry::Vacant(entry) => {
+                            let (client_sender, mut client_receiver) = mpsc::unbounded();
+                            entry.insert(Client { peer_id: client_id.clone(), address, port, sender: client_sender });
+                            
+                            let peers_to_be_sent = peers.values()
+                                .filter(|peer| !peer.peer_id.eq(&client_id))
+                                .map(|peer| ConnectedPeer { peer_id: peer.peer_id.clone(), address: peer.address.clone(), port: peer.port })
+                                .collect();
+
+                            let (client_connected_event, peers_json) = get_connected_event(id, &client_id, peers_to_be_sent);
+
+                            debug!("Sending client connected event {:?}",client_connected_event);
+                            send_message(Arc::clone(&stream), peers_json).await;
+
+                            let mut disconnect_sender = disconnect_sender.clone();
+
+                            spawn_and_log_error(async move {
+                                let res = connection_writer_loop(&mut client_receiver, stream, shutdown).await;
+                                disconnect_sender.send((client_id, client_receiver)).await.unwrap();
+                                res
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        drop(peers); // 5
+        drop(disconnect_sender); // 6
+        while let Some((_name, _pending_messages)) = disconnect_receiver.next().await {}
+    }
+
+    async fn send_message(stream: Arc<TcpStream>, peers_json: String) {
+        let _rs = (&*stream).write_all(peers_json.as_bytes()).await;
+        let _rs = (&*stream).write_all(b"\n").await;
+    }
+
+    fn get_connected_event(id: String, client_id: &str, peers_to_be_sent: Vec<ConnectedPeer>) -> (ClientEvent, String) {
+        let client_connected_event = ClientEvent::ClientConnected { id, client_id: String::from(client_id), peers: peers_to_be_sent };
+        let peers_json = match serde_json::to_string(&client_connected_event) {
+            Err(..) => String::new(),
+            Ok(json) => json,
+        };
+        (client_connected_event, peers_json)
+    }
+
+    async fn connection_writer_loop(messages: &mut Receiver<ClientEvent>, stream: Arc<TcpStream>, shutdown: Receiver<Void>) -> Result<()> {
+        let mut stream = &*stream;
+        let mut messages = messages.fuse();
+        let mut shutdown = shutdown.fuse();
+        loop {
+            select! {
+                msg = messages.next().fuse() => match msg {
+                    Some(msg) => {
+                        match serde_json::to_string(&msg) {
+                            Err(..) => {
+                                warn!("Failed to convert {:?} to JSON",msg);
+                            },
+                            Ok(json_event) => {
+                                stream.write_all(json_event.as_bytes()).await?;
+                                stream.write_all(b"\n").await?;
+                                debug!("Succesfilly sent event to peer");
+                            }
+                        }
+                    },
+                    None => break,
+                },
+                void = shutdown.next().fuse() => match void {
+                    Some(void) => match void {},
+                    None => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn connection_loop(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
+        let stream = Arc::new(stream);
+        let addr = stream.peer_addr();
+        let reader = BufReader::new(&*stream);
+
+        let mut lines = reader.lines();
+
+        let message = match lines.next().await {
+            None => Err("peer disconnected immediately")?,
+            Some(line) => line?,
+        };
+
+        let addr = match addr {
+            Err(..) => Err("Cannot get peer address")?,
+            Ok(address) => address.ip().to_string(),
+        };
+
+        let (id, client_id, port) = extract_connect_client(&message)?;
+
+        debug!("Receive new ConnectClient id :{:?} peer:{:}",id,client_id);
+        let (_shutdown_sender, shutdown_receiver) = mpsc::unbounded::<Void>();
+        broker.send(Event::NewClient { id, client_id: client_id.clone(), address: addr, port, stream: Arc::clone(&stream), shutdown: shutdown_receiver }).await.unwrap();
+
+
+        let error_threshold = 10;
+        let mut error_count = 0;
+        while let Some(line) = lines.next().await {
+            let line = match line {
+                Err(err) => {
+                    warn!("Error {:?} reading line from {:?}",err,client_id);
+                    error_count += 1;
+                    if error_count == error_threshold {
+                        Err("Client error count reached the threshold")?
+                    }
+                    continue;
+                }
+                Ok(message) => {
+                    error_count = 0;
+                    message
+                }
+            };
+
+            match serde_json::from_str(&line) {
+                Err(err) => Err(err)?,
+                Ok(message) => {
+                    match message {
+                        ClientCommand::LeaveClient { id, client_id } => {
+                            info!("Received Client leave command id::{} client::{}",id,client_id);
+                            broker.send(Event::ClientLeft {id,client_id}).await.unwrap();
+                        }
+                        _ => Err("First event wasn't a ClientCommand ")?
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_connect_client(message: &String) -> Result<(String, String, i32)> {
+        let (id, client_id, port) = match serde_json::from_str(&message) {
+            Err(err) => Err(err)?,
+            Ok(message) => {
+                match message {
+                    ClientCommand::ConnectClient { id, client_id, port } => {
+                        (id, client_id, port)
+                    }
+                    _ => Err("First event wasn't a ClientCommand ")?
+                }
+            }
+        };
+        Ok((id, client_id, port))
+    }
+}
